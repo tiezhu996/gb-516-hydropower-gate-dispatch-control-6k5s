@@ -18,6 +18,18 @@ type ExecutionConfirmation struct {
 	RelatedCode string     `json:"relatedCode" gorm:"size:64;uniqueIndex;not null"`
 	ConfirmedBy string     `json:"confirmedBy" gorm:"size:80;index"`
 	ConfirmedAt *time.Time `json:"confirmedAt"`
+	// MeasuredGateState is the gate position measured on site; ObservedAt is
+	// when that measurement was taken. A directive completes only when the
+	// measurement equals the directive target, was observed after execution
+	// started, and still matches the gate read back at confirmation time.
+	MeasuredGateState string     `json:"measuredGateState" gorm:"size:32;index"`
+	ObservedAt        *time.Time `json:"observedAt"`
+	// VerifyStatus/VerifyDetail persist the latest confirmation-time
+	// verification. A failed verification keeps the receipt pending and the
+	// directive executing so the operator can correct the receipt and retry.
+	VerifyStatus string     `json:"verifyStatus" gorm:"size:16;index"`
+	VerifyDetail string     `json:"verifyDetail" gorm:"size:500"`
+	VerifiedAt   *time.Time `json:"verifiedAt"`
 }
 
 func (item *ExecutionConfirmation) GetBase() *BaseModel { return &item.BaseModel }

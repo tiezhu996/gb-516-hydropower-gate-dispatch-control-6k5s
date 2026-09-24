@@ -178,6 +178,11 @@ func (s *operationDirectiveService) Transition(ctx context.Context, id uint, inp
 		approval = &model.DirectiveApproval{Stage: "approved", Actor: actor, Role: role, RequestID: requestID,
 			Reason: strings.TrimSpace(input.Reason), FromState: before, ToState: target, CreatedAt: now}
 	}
+	if target == string(constants.DirectiveStateExecuting) {
+		// Receipt verification compares the on-site observation time against
+		// this exact execution start timestamp.
+		current.ExecutedAt = &now
+	}
 	current.Version = input.ExpectedVersion + 1
 	current.UpdatedAt = now
 	audit := &model.AuditLog{Actor: actor, RequestID: requestID, Action: "transition", EntityType: "OperationDirective", EntityID: id,

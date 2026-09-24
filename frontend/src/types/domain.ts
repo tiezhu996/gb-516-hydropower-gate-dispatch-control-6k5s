@@ -20,6 +20,12 @@ export interface DomainRecord {
 	submittedAt?: string;
 	approvedBy?: string;
 	approvedAt?: string;
+	executedAt?: string;
+	measuredGateState?: 'open' | 'closed' | 'moving' | 'locked';
+	observedAt?: string;
+	verifyStatus?: 'passed' | 'failed' | '';
+	verifyDetail?: string;
+	verifiedAt?: string;
 	confirmedBy?: string;
 	confirmedAt?: string;
 	approvals?: DirectiveApproval[];

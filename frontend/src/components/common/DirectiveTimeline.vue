@@ -3,6 +3,7 @@
 import type { DomainRecord } from '../../types/domain';
 import { formatDate } from '../../utils/format';
 import StatusBadge from './StatusBadge.vue';
+import GateStateBadge from './GateStateBadge.vue';
 
 defineProps<{ records: DomainRecord[]; kind: string }>();
 </script>
@@ -21,7 +22,13 @@ defineProps<{ records: DomainRecord[]; kind: string }>();
           </li>
           <li v-if="!(item.approvals || []).length" class="pending-step">等待值班员提交</li>
         </ol>
-        <p v-else>{{ item.confirmedBy ? `${item.confirmedBy} 于 ${formatDate(item.confirmedAt || '')}确认` : item.evidence }}</p>
+        <p v-else>
+          <template v-if="item.measuredGateState">实测
+            <GateStateBadge :state="item.measuredGateState" />
+            <small v-if="item.observedAt">{{ formatDate(item.observedAt) }}</small>
+          </template>
+          <template v-else>{{ item.confirmedBy ? `${item.confirmedBy} 于 ${formatDate(item.confirmedAt || '')}确认` : item.evidence }}</template>
+        </p>
       </article>
     </div>
     <div v-else class="empty">暂无可展示的调度证据</div>

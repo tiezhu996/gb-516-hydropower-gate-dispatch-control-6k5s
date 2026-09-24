@@ -104,14 +104,34 @@ complete=$(jq -n --argjson version "$version" '{status:"completed",expectedVersi
 expect_status 422 -X POST "$api/directives/$id/transition" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$complete"
 
 confirmation_code="EC-VAL-$suffix"
-confirmation_payload=$(jq -n --arg code "$confirmation_code" --arg related "$code" --arg at "$now" '{code:$code,name:"泄洪闸执行回执",description:"现场执行验证",facility:"水电站闸门调度许可区域2",owner:"运行一组",category:"执行回执",riskLevel:"high",metricValue:35,metricUnit:"%",effectiveAt:$at,evidence:"闸位反馈、视频和对讲记录已核对",relatedCode:$related}')
+observed_at=$(date -u -d '+60 seconds' '+%Y-%m-%dT%H:%M:%SZ')
+confirmation_payload=$(jq -n --arg code "$confirmation_code" --arg related "$code" --arg at "$now" --arg observed "$observed_at" '{code:$code,name:"泄洪闸执行回执",description:"现场执行验证",facility:"水电站闸门调度许可区域2",owner:"运行一组",category:"执行回执",riskLevel:"high",metricValue:35,metricUnit:"%",effectiveAt:$at,evidence:"闸位反馈、视频和对讲记录已核对",relatedCode:$related,measuredGateState:"open",observedAt:$observed}')
 confirmation=$(curl -fsS -X POST "$api/confirmations" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$confirmation_payload")
 confirmation_id=$(printf '%s' "$confirmation" | jq -er '.data.id')
 confirmation_version=$(printf '%s' "$confirmation" | jq -er '.data.version')
-confirm_body=$(jq -n --argjson version "$confirmation_version" '{status:"confirmed",expectedVersion:$version,reason:"现场闸位反馈与批准指令一致"}')
-curl -fsS -X POST "$api/confirmations/$confirmation_id/transition" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -H "X-Request-ID: val-confirm-$suffix" -d "$confirm_body" | jq -e '.data.status == "confirmed" and .data.confirmedBy == "operator" and .data.confirmedAt' >/dev/null
+printf '%s' "$confirmation" | jq -e '.data.measuredGateState == "open" and (.data.observedAt | length > 0)' >/dev/null
 
-curl -fsS "$api/gates/2" -H "Authorization: Bearer $operator_token" | jq -e '.data.status == "open"' >/dev/null
+# Gate is still moving: confirmation must be rejected while receipt and directive stay live.
+confirm_body=$(jq -n --argjson version "$confirmation_version" '{status:"confirmed",expectedVersion:$version,reason:"闸门尚未反馈目标开度，不能完成"}')
+expect_status 422 -X POST "$api/confirmations/$confirmation_id/transition" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$confirm_body"
+curl -fsS "$api/confirmations/$confirmation_id" -H "Authorization: Bearer $operator_token" | jq -e '.data.status == "pending" and .data.verifyStatus == "failed" and (.data.verifyDetail | contains("实测值"))' >/dev/null
+curl -fsS "$api/directives/$id" -H "Authorization: Bearer $operator_token" | jq -e '.data.status == "executing"' >/dev/null
+curl -fsS "$api/gates/2" -H "Authorization: Bearer $operator_token" | jq -e '.data.status == "moving"' >/dev/null
+
+# Field equipment reports the gate settled at open through its own channel.
+gate_version=$(curl -fsS "$api/gates/2" -H "Authorization: Bearer $operator_token" | jq -er '.data.version')
+gate_open=$(jq -n --argjson version "$gate_version" '{status:"open",expectedVersion:$version,reason:"现场设备反馈闸门已落定至开启"}')
+curl -fsS -X POST "$api/gates/2/transition" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$gate_open" | jq -e '.data.status == "open"' >/dev/null
+
+# Stale receipt version from the failed verification must be rejected first.
+expect_status 409 -X POST "$api/confirmations/$confirmation_id/transition" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$confirm_body"
+confirmation_version=$(curl -fsS "$api/confirmations/$confirmation_id" -H "Authorization: Bearer $operator_token" | jq -er '.data.version')
+confirm_body=$(jq -n --argjson version "$confirmation_version" '{status:"confirmed",expectedVersion:$version,reason:"现场闸位反馈与批准指令一致"}')
+gate_version_before=$(curl -fsS "$api/gates/2" -H "Authorization: Bearer $operator_token" | jq -er '.data.version')
+curl -fsS -X POST "$api/confirmations/$confirmation_id/transition" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -H "X-Request-ID: val-confirm-$suffix" -d "$confirm_body" | jq -e '.data.status == "confirmed" and .data.confirmedBy == "operator" and .data.confirmedAt and .data.verifyStatus == "passed"' >/dev/null
+# Confirmation must not rewrite the gate: version stays untouched.
+curl -fsS "$api/gates/2" -H "Authorization: Bearer $operator_token" | jq -e --argjson before "$gate_version_before" '.data.status == "open" and .data.version == $before' >/dev/null
+
 gate_version=$(curl -fsS "$api/gates/2" -H "Authorization: Bearer $operator_token" | jq -er '.data.version')
 direct_close=$(jq -n --argjson version "$gate_version" '{status:"closed",expectedVersion:$version,reason:"不得绕过 moving 中间态"}')
 expect_status 422 -X POST "$api/gates/2/transition" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$direct_close"

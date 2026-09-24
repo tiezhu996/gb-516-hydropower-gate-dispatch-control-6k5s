@@ -66,6 +66,7 @@ func (s *executionConfirmationService) Create(ctx context.Context, input dto.Cre
 		MetricValue: input.MetricValue, MetricUnit: strings.TrimSpace(input.MetricUnit),
 		EffectiveAt: input.EffectiveAt.UTC(), Evidence: strings.TrimSpace(input.Evidence),
 		RelatedCode: directive.Code,
+		MeasuredGateState: strings.TrimSpace(input.MeasuredGateState), ObservedAt: ptrTime(input.ObservedAt.UTC()),
 	}
 	if err := s.security.WithinTransaction(ctx, func(txCtx context.Context) error {
 		if err := s.repository.Create(txCtx, &item); err != nil {
@@ -107,6 +108,13 @@ func (s *executionConfirmationService) Update(ctx context.Context, id uint, inpu
 	current.EffectiveAt = input.EffectiveAt.UTC()
 	current.Evidence = strings.TrimSpace(input.Evidence)
 	current.RelatedCode = directive.Code
+	current.MeasuredGateState = strings.TrimSpace(input.MeasuredGateState)
+	current.ObservedAt = ptrTime(input.ObservedAt.UTC())
+	// Editing the receipt clears the previous verification outcome so a stale
+	// failure reason is never presented against corrected evidence.
+	current.VerifyStatus = ""
+	current.VerifyDetail = ""
+	current.VerifiedAt = nil
 	current.Version = input.ExpectedVersion + 1
 	current.UpdatedAt = time.Now().UTC()
 	if err := s.security.WithinTransaction(ctx, func(txCtx context.Context) error {
@@ -131,17 +139,11 @@ func (s *executionConfirmationService) Transition(ctx context.Context, id uint, 
 	}
 	before := current.Status
 	now := time.Now().UTC()
-	current.Status = target
-	if target == "confirmed" {
-		current.ConfirmedBy = actor
-		current.ConfirmedAt = &now
-	}
-	current.Version = input.ExpectedVersion + 1
-	current.UpdatedAt = now
 
 	var directive model.OperationDirective
 	var gate model.GateUnit
 	var directiveTarget, gateTarget string
+	var verifyFailure string
 	if before == model.ExecutionConfirmationInitialStatus {
 		directive, err = s.requireExecutingDirective(ctx, current.RelatedCode)
 		if err != nil {
@@ -151,15 +153,54 @@ func (s *executionConfirmationService) Transition(ctx context.Context, id uint, 
 		if err != nil {
 			return model.ExecutionConfirmation{}, fmt.Errorf("linked gate %q: %w", directive.RelatedCode, err)
 		}
-		if target == "confirmed" {
-			directiveTarget, gateTarget = string(constants.DirectiveStateCompleted), directive.GateState
-		} else {
+		if target == "failed" {
 			directiveTarget, gateTarget = string(constants.DirectiveStateAborted), string(constants.GateStateLocked)
-		}
-		if gate.Status != gateTarget && !constants.CanTransition(constants.GateUnitTransitions, gate.Status, gateTarget) {
-			return model.ExecutionConfirmation{}, fmt.Errorf("%w: gate %s cannot move from %s to %s", ErrInvalidTransition, gate.Code, gate.Status, gateTarget)
+			if gate.Status != gateTarget && !constants.CanTransition(constants.GateUnitTransitions, gate.Status, gateTarget) {
+				return model.ExecutionConfirmation{}, fmt.Errorf("%w: gate %s cannot move from %s to %s", ErrInvalidTransition, gate.Code, gate.Status, gateTarget)
+			}
+		} else {
+			// Confirmation never drives the gate: the gate must already be at
+			// the target position. Re-read both directive and gate inside the
+			// verification checks below, inside the committing transaction.
+			directiveTarget = string(constants.DirectiveStateCompleted)
+			verifyFailure = verifyConfirmation(ctx, current, &directive, &gate, s)
 		}
 	}
+
+	if verifyFailure != "" {
+		// Any failed check keeps the receipt pending and the directive
+		// executing. Persist the detailed verification outcome so the page can
+		// explain the reason; the gate is intentionally never written here.
+		current.VerifyStatus = "failed"
+		current.VerifyDetail = verifyFailure
+		current.VerifiedAt = &now
+		current.Version = input.ExpectedVersion + 1
+		current.UpdatedAt = now
+		if txErr := s.security.WithinTransaction(ctx, func(txCtx context.Context) error {
+			if err := s.repository.Update(txCtx, id, input.ExpectedVersion, &current); err != nil {
+				return err
+			}
+			return s.security.Audit(txCtx, actor, requestID, "verification_failed", "ExecutionConfirmation", id, before, before, verifyFailure)
+		}); txErr != nil {
+			return model.ExecutionConfirmation{}, fmt.Errorf("record verification failure: %w", txErr)
+		}
+		stored, getErr := s.repository.Get(ctx, id)
+		if getErr != nil {
+			return model.ExecutionConfirmation{}, getErr
+		}
+		return stored, fmt.Errorf("%w: %s", ErrInvalidInput, verifyFailure)
+	}
+
+	current.Status = target
+	if target == "confirmed" {
+		current.ConfirmedBy = actor
+		current.ConfirmedAt = &now
+		current.VerifyStatus = "passed"
+		current.VerifyDetail = "实测闸位与指令目标一致，观测时间晚于开始执行，当前闸门状态与实测值相同"
+		current.VerifiedAt = &now
+	}
+	current.Version = input.ExpectedVersion + 1
+	current.UpdatedAt = now
 
 	if err := s.security.WithinTransaction(ctx, func(txCtx context.Context) error {
 		if err := s.repository.Update(txCtx, id, input.ExpectedVersion, &current); err != nil {
@@ -171,24 +212,49 @@ func (s *executionConfirmationService) Transition(ctx context.Context, id uint, 
 		if directiveTarget == "" {
 			return nil
 		}
-		directiveBefore := directive.Status
+		// Re-read the directive and gate inside the transaction so a concurrent
+		// state change cannot be overwritten by stale data loaded beforehand.
+		freshDirective, directiveErr := s.directives.Get(txCtx, directive.ID)
+		if directiveErr != nil {
+			return directiveErr
+		}
+		if freshDirective.Status != string(constants.DirectiveStateExecuting) {
+			return fmt.Errorf("%w: directive %s is no longer executing", ErrInvalidTransition, directive.Code)
+		}
+		freshGate, gateErr := s.gates.Get(txCtx, gate.ID)
+		if gateErr != nil {
+			return gateErr
+		}
+		directiveBefore := freshDirective.Status
+		if target == "confirmed" {
+			// The gate must already equal the measured value. The confirmation
+			// interface never writes it.
+			if freshGate.Status != current.MeasuredGateState {
+				return fmt.Errorf("%w: gate %s currently reads %s, measured value is %s",
+					ErrInvalidInput, gate.Code, freshGate.Status, current.MeasuredGateState)
+			}
+		} else if freshGate.Status != gateTarget &&
+			!constants.CanTransition(constants.GateUnitTransitions, freshGate.Status, gateTarget) {
+			return fmt.Errorf("%w: gate %s cannot move from %s to %s",
+				ErrInvalidTransition, gate.Code, freshGate.Status, gateTarget)
+		}
 		directive.Status = directiveTarget
-		directive.Version++
+		directive.Version = freshDirective.Version + 1
 		directive.UpdatedAt = now
-		if err := s.directives.Update(txCtx, directive.ID, directive.Version-1, &directive); err != nil {
+		if err := s.directives.Update(txCtx, directive.ID, freshDirective.Version, &directive); err != nil {
 			return err
 		}
 		if err := s.security.Audit(txCtx, actor, requestID, "execution_outcome", "OperationDirective", directive.ID, directiveBefore, directiveTarget, input.Reason); err != nil {
 			return err
 		}
-		if gate.Status == gateTarget {
+		if gateTarget == "" || freshGate.Status == gateTarget {
 			return nil
 		}
-		gateBefore := gate.Status
-		gate.Status = gateTarget
-		gate.Version++
-		gate.UpdatedAt = now
-		if err := s.gates.Update(txCtx, gate.ID, gate.Version-1, &gate); err != nil {
+		gateBefore := freshGate.Status
+		freshGate.Status = gateTarget
+		freshGate.Version++
+		freshGate.UpdatedAt = now
+		if err := s.gates.Update(txCtx, gate.ID, freshGate.Version-1, &freshGate); err != nil {
 			return err
 		}
 		return s.security.Audit(txCtx, actor, requestID, "execution_outcome", "GateUnit", gate.ID, gateBefore, gateTarget, input.Reason)
@@ -196,6 +262,63 @@ func (s *executionConfirmationService) Transition(ctx context.Context, id uint, 
 		return model.ExecutionConfirmation{}, fmt.Errorf("transition 执行确认: %w", err)
 	}
 	return s.repository.Get(ctx, id)
+}
+
+// verifyConfirmation enforces the three on-site evidence rules. Every check
+// re-reads current state rather than trusting stale caller data. A non-empty
+// result is the human-readable reason the directive must not be completed.
+func verifyConfirmation(ctx context.Context, receipt model.ExecutionConfirmation, directive *model.OperationDirective, gate *model.GateUnit, s *executionConfirmationService) string {
+	freshDirective, err := s.directives.GetByCode(ctx, receipt.RelatedCode)
+	if err != nil {
+		return fmt.Sprintf("无法重新读取关联指令 %s：%v", receipt.RelatedCode, err)
+	}
+	*directive = freshDirective
+	if freshDirective.Status != string(constants.DirectiveStateExecuting) {
+		return fmt.Sprintf("关联指令 %s 当前状态为 %s，不是执行中，不能完成", freshDirective.Code, freshDirective.Status)
+	}
+	if freshDirective.ExecutedAt == nil {
+		return fmt.Sprintf("关联指令 %s 缺少开始执行时间，无法校验观测时序", freshDirective.Code)
+	}
+	freshGate, err := s.gates.GetByCode(ctx, freshDirective.RelatedCode)
+	if err != nil {
+		return fmt.Sprintf("无法重新读取闸门 %s：%v", freshDirective.RelatedCode, err)
+	}
+	*gate = freshGate
+
+	measured := strings.TrimSpace(receipt.MeasuredGateState)
+	if measured == "" || receipt.ObservedAt == nil || receipt.ObservedAt.IsZero() {
+		return "回执缺少现场实测闸位或观测时间，请补全后再确认"
+	}
+	if measured != freshDirective.GateState {
+		return fmt.Sprintf("实测闸位 %s 与指令目标 %s 不一致", stateLabel(measured), stateLabel(freshDirective.GateState))
+	}
+	if !receipt.ObservedAt.UTC().After(freshDirective.ExecutedAt.UTC()) {
+		return fmt.Sprintf("观测时间 %s 不晚于开始执行时间 %s",
+			receipt.ObservedAt.UTC().Format(time.RFC3339), freshDirective.ExecutedAt.UTC().Format(time.RFC3339))
+	}
+	if freshGate.Status != measured {
+		return fmt.Sprintf("闸门 %s 当前状态为 %s，与实测值 %s 不一致", freshGate.Code, stateLabel(freshGate.Status), stateLabel(measured))
+	}
+	return ""
+}
+
+func stateLabel(state string) string {
+	switch state {
+	case "open":
+		return "开启"
+	case "closed":
+		return "关闭"
+	case "moving":
+		return "动作中"
+	case "locked":
+		return "闭锁"
+	default:
+		return state
+	}
+}
+
+func ptrTime(value time.Time) *time.Time {
+	return &value
 }
 
 func (s *executionConfirmationService) Delete(ctx context.Context, id uint, actor, requestID string) error {
