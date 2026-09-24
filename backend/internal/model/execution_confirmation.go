@@ -7,17 +7,30 @@ import "time"
 // changes naturally span persistence, service and UI layers.
 type ExecutionConfirmation struct {
 	BaseModel
-	Facility    string     `json:"facility" gorm:"size:120;index"`
-	Owner       string     `json:"owner" gorm:"size:120;index"`
-	Category    string     `json:"category" gorm:"size:80;index"`
-	RiskLevel   string     `json:"riskLevel" gorm:"size:32;index"`
-	MetricValue float64    `json:"metricValue"`
-	MetricUnit  string     `json:"metricUnit" gorm:"size:24"`
-	EffectiveAt time.Time  `json:"effectiveAt"`
-	Evidence    string     `json:"evidence" gorm:"size:2000"`
-	RelatedCode string     `json:"relatedCode" gorm:"size:64;uniqueIndex;not null"`
-	ConfirmedBy string     `json:"confirmedBy" gorm:"size:80;index"`
-	ConfirmedAt *time.Time `json:"confirmedAt"`
+	Facility          string     `json:"facility" gorm:"size:120;index"`
+	Owner             string     `json:"owner" gorm:"size:120;index"`
+	Category          string     `json:"category" gorm:"size:80;index"`
+	RiskLevel         string     `json:"riskLevel" gorm:"size:32;index"`
+	MetricValue       float64    `json:"metricValue"`
+	MetricUnit        string     `json:"metricUnit" gorm:"size:24"`
+	EffectiveAt       time.Time  `json:"effectiveAt"`
+	Evidence          string     `json:"evidence" gorm:"size:2000"`
+	RelatedCode       string     `json:"relatedCode" gorm:"size:64;uniqueIndex;not null"`
+	MeasuredGateState string     `json:"measuredGateState" gorm:"size:32;not null"`
+	ObservedAt        time.Time  `json:"observedAt"`
+	ConfirmedBy       string     `json:"confirmedBy" gorm:"size:80;index"`
+	ConfirmedAt       *time.Time `json:"confirmedAt"`
+
+	// Verification is derived on read by re-reading the linked directive and
+	// gate; it is intentionally not persisted.
+	Verification *ConfirmationVerification `json:"verification,omitempty" gorm:"-"`
+}
+
+// ConfirmationVerification reports the live field check used before a receipt
+// is allowed to complete its directive.
+type ConfirmationVerification struct {
+	Passed  bool     `json:"passed"`
+	Reasons []string `json:"reasons"`
 }
 
 func (item *ExecutionConfirmation) GetBase() *BaseModel { return &item.BaseModel }

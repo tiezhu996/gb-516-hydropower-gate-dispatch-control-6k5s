@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue';
 import { Plus, Refresh, Search } from '@element-plus/icons-vue';
 import type { DomainRecord, EntityConfig } from '../types/domain';
-import { allowedTransitions } from '../types/status';
+import { allowedTransitions, ALL_GATE_STATE } from '../types/status';
 import { formatDate, riskLabel, statusLabel } from '../utils/format';
 import { useAuth } from '../hooks/useAuth';
 import { usePolling } from '../hooks/usePolling';
@@ -23,6 +23,7 @@ const relatedOptions = ref<DomainRecord[]>([]);
 const createForm = reactive({
   code: '', name: '', description: '', facility: '', owner: '', category: '',
   riskLevel: 'medium', metricValue: 0, metricUnit: '%', evidence: '', relatedCode: '', gateState: 'closed',
+  measuredGateState: 'closed' as string, observedAt: new Date(),
 });
 
 const highRisk = computed(() => props.store.items.filter((item: DomainRecord) => ['high', 'critical'].includes(item.riskLevel)).length);
@@ -31,7 +32,7 @@ const pageDescription = computed(() => ({
   reservoir: '监控水位阈值与许可窗口，为调度决策提供约束。',
   gateUnit: '查看闸门实时状态，所有开闭动作必须经过中间态。',
   operationDirective: '编排闸门指令，并由不同账号完成提交与安全复核。',
-  executionConfirmation: '记录现场执行结果、证据及关联操作指令。',
+  executionConfirmation: '登记现场实测闸位与观测时间；确认时重新读取闸门，实测值、观测时间与当前闸位三项全部符合才完成指令。',
 }[props.config.key] || `管理${props.config.label}状态、风险与责任人。`));
 
 async function load(): Promise<void> {
@@ -66,6 +67,8 @@ async function prepareCreate(): Promise<void> {
 	createForm.evidence = '';
 	createForm.relatedCode = '';
   createForm.gateState = 'closed';
+	createForm.measuredGateState = 'closed';
+	createForm.observedAt = new Date();
 	relatedOptions.value = [];
 	const relationPaths: Record<string, string> = { gateUnit: 'reservoirs', operationDirective: 'gates', executionConfirmation: 'directives' };
 	try {
@@ -87,7 +90,12 @@ async function prepareCreate(): Promise<void> {
 function selectRelated(code: string): void {
 	createForm.relatedCode = code;
 	const related = relatedOptions.value.find((item) => item.code === code);
-	if (related) createForm.facility = related.facility;
+	if (related) {
+		createForm.facility = related.facility;
+		if (props.config.key === 'executionConfirmation' && related.gateState) {
+			createForm.measuredGateState = related.gateState;
+		}
+	}
 }
 
 async function createRecord(): Promise<void> {
@@ -95,7 +103,14 @@ async function createRecord(): Promise<void> {
 		props.store.error = '请完整填写必填业务字段和现场证据';
 		return;
 	}
-  await props.store.createRecord(props.config.path, { ...createForm, effectiveAt: new Date().toISOString() });
+	const payload: Record<string, unknown> = { ...createForm, effectiveAt: new Date().toISOString() };
+	if (props.config.key === 'executionConfirmation') {
+		payload.observedAt = new Date(createForm.observedAt).toISOString();
+	} else {
+		delete payload.measuredGateState;
+		delete payload.observedAt;
+	}
+  await props.store.createRecord(props.config.path, payload);
   if (!props.store.error) showCreate.value = false;
 }
 
@@ -165,6 +180,22 @@ async function confirmTransition(): Promise<void> {
 		<el-table-column v-if="config.key === 'operationDirective'" label="目标状态" width="120">
           <template #default="{ row }"><GateStateBadge :state="row.gateState || 'closed'" /></template>
         </el-table-column>
+		<el-table-column v-if="config.key === 'executionConfirmation'" label="实测闸位" width="110">
+          <template #default="{ row }"><GateStateBadge :state="row.measuredGateState || 'closed'" /></template>
+        </el-table-column>
+		<el-table-column v-if="config.key === 'executionConfirmation'" label="观测时间" width="165">
+          <template #default="{ row }">{{ formatDate(row.observedAt) }}</template>
+        </el-table-column>
+		<el-table-column v-if="config.key === 'executionConfirmation'" label="校验结果" min-width="220">
+          <template #default="{ row }">
+            <el-tag v-if="row.verification?.passed" type="success" size="small">校验通过</el-tag>
+            <div v-else-if="row.verification" class="verify-fail">
+              <el-tag type="danger" size="small">未通过</el-tag>
+              <small v-for="(reason, index) in row.verification.reasons" :key="index">{{ reason }}</small>
+            </div>
+            <span v-else class="muted">—</span>
+          </template>
+        </el-table-column>
 		<el-table-column label="风险" width="80"><template #default="{ row }">{{ riskLabel(row.riskLevel) }}</template></el-table-column>
         <el-table-column prop="owner" label="责任人" min-width="110" />
 		<el-table-column v-if="['gateUnit', 'operationDirective', 'executionConfirmation'].includes(config.key)" prop="relatedCode" :label="relationLabel" width="130" />
@@ -199,6 +230,14 @@ async function confirmTransition(): Promise<void> {
 		  <el-form-item :label="metricLabel"><el-input-number v-model="createForm.metricValue" :min="0" :precision="2" controls-position="right" /></el-form-item>
 		  <el-form-item label="指标单位"><el-input v-model="createForm.metricUnit" /></el-form-item>
 		  <el-form-item v-if="config.key === 'operationDirective'" label="目标闸门状态"><el-select v-model="createForm.gateState"><el-option v-for="state in ['open', 'closed', 'locked']" :key="state" :label="statusLabel(state)" :value="state" /></el-select></el-form-item>
+		  <el-form-item v-if="config.key === 'executionConfirmation'" label="现场实测闸位">
+			<el-select v-model="createForm.measuredGateState">
+				<el-option v-for="state in ALL_GATE_STATE" :key="state" :label="statusLabel(state)" :value="state" />
+			</el-select>
+		  </el-form-item>
+		  <el-form-item v-if="config.key === 'executionConfirmation'" label="现场观测时间">
+			<el-date-picker v-model="createForm.observedAt" type="datetime" format="YYYY-MM-DD HH:mm" placeholder="选择现场观测时间" class="full-width" />
+		  </el-form-item>
         </div>
 		<el-form-item label="业务说明"><el-input v-model="createForm.description" type="textarea" :rows="2" maxlength="1000" show-word-limit /></el-form-item>
         <el-form-item label="现场证据"><el-input v-model="createForm.evidence" type="textarea" :rows="3" /></el-form-item>
@@ -208,6 +247,23 @@ async function confirmTransition(): Promise<void> {
     <ConfirmDialog :model-value="Boolean(pending)" title="确认状态迁移" confirm-label="确认并记录审计" @update:model-value="pending = null" @confirm="confirmTransition">
       <p>此次操作会校验角色和版本，并将状态、请求 ID 与审计证据原子写入。</p>
       <div class="transition-summary"><StatusBadge :status="pending?.item.status || ''" /><span>到</span><StatusBadge :status="pending?.status || ''" /></div>
+	  <div v-if="config.key === 'executionConfirmation' && pending?.status === 'confirmed'" class="verify-panel">
+		<p>系统会在确认瞬间重新读取关联指令与闸门，仅当以下三项同时满足才会完成指令，否则保留待确认回执：</p>
+		<ul>
+			<li>实测闸位与指令目标闸位一致；</li>
+			<li>现场观测时间晚于指令开始执行时间；</li>
+			<li>当前闸门状态与实测闸位一致。</li>
+		</ul>
+		<div v-if="pending.item.verification?.passed" class="verify-pass">
+			<el-tag type="success" size="small">实时校验通过</el-tag>
+			<span>实测闸位与观测时间满足要求，闸门当前状态一致。</span>
+		</div>
+		<div v-else-if="pending.item.verification" class="verify-fail">
+			<el-tag type="danger" size="small">实时校验未通过</el-tag>
+			<small v-for="(reason, index) in pending.item.verification.reasons" :key="index">{{ reason }}</small>
+			<span class="muted">确认将被拒绝，回执和指令均保持现状，可在闸门到位后重新确认。</span>
+		</div>
+	  </div>
       <el-input v-model="transitionReason" type="textarea" :rows="3" maxlength="500" show-word-limit aria-label="迁移原因" />
     </ConfirmDialog>
   </main>

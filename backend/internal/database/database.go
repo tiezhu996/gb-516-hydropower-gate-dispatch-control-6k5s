@@ -193,6 +193,7 @@ func seedOperationDirective(ctx context.Context, db *gorm.DB) error {
 	now := time.Now().UTC()
 	submittedAt := now.Add(-2 * time.Hour)
 	approvedAt := now.Add(-time.Hour)
+	executedAt := now.Add(-30 * time.Minute)
 	items := []model.OperationDirective{
 
 		{BaseModel: model.BaseModel{Code: "OD-001", Name: "操作指令示例一", Status: "draft", Version: 1,
@@ -210,7 +211,7 @@ func seedOperationDirective(ctx context.Context, db *gorm.DB) error {
 			Description: "用于启动验证和主要流程演示的操作指令记录"}, Facility: "水电站闸门调度许可区域3", Owner: "安全主管组",
 			Category: "复核", RiskLevel: "high", MetricValue: 37.5, MetricUnit: "score",
 			EffectiveAt: now.Add(6 * time.Hour), Evidence: "双人确认已完成，现场正在执行", RelatedCode: "GU-003", GateState: "open",
-			SubmittedBy: "operator", SubmittedAt: &submittedAt, ApprovedBy: "reviewer", ApprovedAt: &approvedAt},
+			SubmittedBy: "operator", SubmittedAt: &submittedAt, ApprovedBy: "reviewer", ApprovedAt: &approvedAt, ExecutedAt: &executedAt},
 	}
 	if err := db.WithContext(ctx).Create(&items).Error; err != nil {
 		return err
@@ -229,11 +230,13 @@ func seedExecutionConfirmation(ctx context.Context, db *gorm.DB) error {
 		return err
 	}
 	now := time.Now().UTC()
+	observedAt := now.Add(-10 * time.Minute)
 	items := []model.ExecutionConfirmation{{
 		BaseModel: model.BaseModel{Code: "EC-001", Name: "右岸泄洪闸现场执行回执", Status: "pending", Version: 1,
 			Description: "关联已批准且正在执行的操作指令，记录现场反馈与证据"},
 		Facility: "水电站闸门调度许可区域3", Owner: "运行一组", Category: "泄洪调度", RiskLevel: "high",
 		MetricValue: 37.5, MetricUnit: "%", EffectiveAt: now, Evidence: "待现场核对开度反馈、视频与水位变化", RelatedCode: "OD-003",
+		MeasuredGateState: "open", ObservedAt: observedAt,
 	}}
 	return db.WithContext(ctx).Create(&items).Error
 }

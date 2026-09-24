@@ -16,15 +16,24 @@ export interface DomainRecord {
   evidence: string;
 	relatedCode: string;
 	gateState?: 'open' | 'closed' | 'moving' | 'locked';
+	measuredGateState?: 'open' | 'closed' | 'moving' | 'locked';
+	observedAt?: string;
+	verification?: ConfirmationVerification;
 	submittedBy?: string;
 	submittedAt?: string;
 	approvedBy?: string;
 	approvedAt?: string;
+	executedAt?: string;
 	confirmedBy?: string;
 	confirmedAt?: string;
 	approvals?: DirectiveApproval[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ConfirmationVerification {
+	passed: boolean;
+	reasons: string[];
 }
 
 export interface DirectiveApproval {

@@ -13,6 +13,7 @@ type OperationDirectiveRepository interface {
 	List(context.Context, dto.PageQuery) (Page[model.OperationDirective], error)
 	Get(context.Context, uint) (model.OperationDirective, error)
 	GetByCode(context.Context, string) (model.OperationDirective, error)
+	ListByCodes(context.Context, []string) ([]model.OperationDirective, error)
 	Create(context.Context, *model.OperationDirective) error
 	Update(context.Context, uint, uint, *model.OperationDirective) error
 	TransitionWithApproval(context.Context, uint, uint, *model.OperationDirective, *model.DirectiveApproval, *model.AuditLog) error
@@ -55,6 +56,14 @@ func (r *operationDirectiveRepository) GetByCode(ctx context.Context, code strin
 		return model.OperationDirective{}, err
 	}
 	return r.Get(ctx, item.ID)
+}
+func (r *operationDirectiveRepository) ListByCodes(ctx context.Context, codes []string) ([]model.OperationDirective, error) {
+	items := make([]model.OperationDirective, 0)
+	if len(codes) == 0 {
+		return items, nil
+	}
+	err := databaseForContext(ctx, r.db).Where("code IN ?", codes).Find(&items).Error
+	return items, err
 }
 func (r *operationDirectiveRepository) Create(ctx context.Context, item *model.OperationDirective) error {
 	return r.store.Create(ctx, item)

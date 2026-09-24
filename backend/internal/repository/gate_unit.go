@@ -13,6 +13,7 @@ type GateUnitRepository interface {
 	List(context.Context, dto.PageQuery) (Page[model.GateUnit], error)
 	Get(context.Context, uint) (model.GateUnit, error)
 	GetByCode(context.Context, string) (model.GateUnit, error)
+	ListByCodes(context.Context, []string) ([]model.GateUnit, error)
 	Create(context.Context, *model.GateUnit) error
 	Update(context.Context, uint, uint, *model.GateUnit) error
 	TransitionWithAudit(context.Context, uint, uint, *model.GateUnit, *model.AuditLog) error
@@ -36,6 +37,14 @@ func (r *gateUnitRepository) Get(ctx context.Context, id uint) (model.GateUnit, 
 }
 func (r *gateUnitRepository) GetByCode(ctx context.Context, code string) (model.GateUnit, error) {
 	return r.store.GetByCode(ctx, code)
+}
+func (r *gateUnitRepository) ListByCodes(ctx context.Context, codes []string) ([]model.GateUnit, error) {
+	items := make([]model.GateUnit, 0)
+	if len(codes) == 0 {
+		return items, nil
+	}
+	err := databaseForContext(ctx, r.store.db).Where("code IN ?", codes).Find(&items).Error
+	return items, err
 }
 func (r *gateUnitRepository) Create(ctx context.Context, item *model.GateUnit) error {
 	return r.store.Create(ctx, item)

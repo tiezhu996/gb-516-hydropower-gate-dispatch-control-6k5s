@@ -21,6 +21,7 @@ type OperationDirective struct {
 	SubmittedAt *time.Time          `json:"submittedAt"`
 	ApprovedBy  string              `json:"approvedBy" gorm:"size:80;index"`
 	ApprovedAt  *time.Time          `json:"approvedAt"`
+	ExecutedAt  *time.Time          `json:"executedAt"`
 	Approvals   []DirectiveApproval `json:"approvals" gorm:"foreignKey:DirectiveID;constraint:OnDelete:CASCADE"`
 }
 
